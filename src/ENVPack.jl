@@ -31,18 +31,50 @@ function read_whole_env!(all_env::Set{PackageSpec}, manifest_path::String)
     all_env
 end
 
+function get_missing_deps(might_missing, registed, packages)
+    weakenv = Set{String}()
+    idir = joinpath(Pkg.depots1(), "registries", "General")
+    for uuid in might_missing
+        for file in ("WeakDeps.toml", "Deps.toml")
+            depsfile = joinpath(idir, packages[uuid]["path"], file)
+            isfile(depsfile) || continue
+            deps = TOML.parsefile(depsfile)
+            for subdeps in values(deps), dep in values(subdeps)
+                is_stdlib(UUID(dep)) || 
+                haskey(registed, dep) ||
+                push!(weakenv, dep)
+            end
+        end
+    end
+    weakenv
+end
+
 function handle_registries(ienv::Set{PackageSpec})
     env = Set(PackageSpec(;name = e.name, uuid = e.uuid, url = e.url, path = e.path) for e in ienv)
     idir = joinpath(Pkg.depots1(), "registries", "General")
-    odir = joinpath(outputdir(), "registries", "MinimumEnv")
+    odir = joinpath(outputdir(), "registries", "MiniGeneral")
     packages = TOML.parsefile(joinpath(idir, "Registry.toml"))["packages"]
     registry_data = RegistryTools.RegistryData("MinimumEnv", uuid4())
+    registed = registry_data.packages
     for pkg in env
         (is_stdlib(pkg.uuid) || pkg.url !== nothing || pkg.path !== nothing) && continue
-        let uuid = string(pkg.uuid), pkgdata = packages[uuid]
+        let uuid = string(pkg.uuid)
+            pkgdata = packages[uuid]
+            registed[uuid] = pkgdata
+            symlink(joinpath.((idir, odir), pkgdata["path"])...)
+        end
+    end
+    # `MiniGeneral` must contain Deps/WeakDeps to work correctly
+    # TODO: ideally a stale dependence should be excluded from Deps.jl
+    weakenv = get_missing_deps(keys(registed), registed, packages)
+    while true
+        isempty(weakenv) && break
+        for uuid in weakenv
+            pkgdata = packages[uuid]
             registry_data.packages[uuid] = pkgdata
             symlink(joinpath.((idir, odir), pkgdata["path"])...)
         end
+        weakenv = get_missing_deps(weakenv, registed, packages)
     end
     RegistryTools.write_registry(joinpath(odir, "Registry.toml"), registry_data)
 end
