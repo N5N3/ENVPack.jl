@@ -4,10 +4,11 @@ using Pkg, TOML, RegistryTools
 using Pkg.Types
 using Pkg: PlatformEngines, MiniProgressBars
 using UUIDs: uuid4
+using Dates
 const TARGET_ARCH = "x86_64"
 const TARGET_OS = "windows"
 
-outputdir() = joinpath(homedir(), ".envpack\\.julia")
+juliatempdir() = joinpath(homedir(), ".envpack\\.julia")
 
 function symlink(target, link)
     @assert isdir(target)
@@ -52,7 +53,7 @@ end
 function handle_registries(ienv::Set{PackageSpec})
     env = Set(PackageSpec(;name = e.name, uuid = e.uuid, url = e.url, path = e.path) for e in ienv)
     idir = joinpath(Pkg.depots1(), "registries", "General")
-    odir = joinpath(outputdir(), "registries", "MiniGeneral")
+    odir = joinpath(juliatempdir(), "registries", "MiniGeneral")
     packages = TOML.parsefile(joinpath(idir, "Registry.toml"))["packages"]
     registry_data = RegistryTools.RegistryData("MinimumEnv", uuid4())
     registed = registry_data.packages
@@ -80,19 +81,30 @@ function handle_registries(ienv::Set{PackageSpec})
 end
 
 function handle_package(env::Set{PackageSpec})
+    history = joinpath(homedir(), ".envpack", "history.toml")
+    oldlog = if isfile(history)
+        TOML.parsefile(history)
+    else
+        Dict{String, Any}("packages" => Dict{String, Any}(), "artifacts" => [])
+    end
+    log = copy(oldlog)
     downs = Any[]
     for (;name, uuid, tree_hash, url, path) in env
         is_stdlib(uuid) && continue
         if path === nothing
             slug = Base.version_slug(uuid, tree_hash)
             ppath = joinpath("packages", name, slug)
-            src = joinpath(Pkg.depots1(), ppath)
-            dst = joinpath(outputdir(), ppath)
+            if !haskey(oldlog["packages"], name) || !in(slug, oldlog["packages"][name])
+                src = joinpath(Pkg.depots1(), ppath)
+                dst = joinpath(juliatempdir(), ppath)
+                symlink(src, dst)
+                push!(get!(Vector{Any}, log["packages"], name), slug)
+            end
         else
             src = path
-            dst = joinpath(outputdir(), "dev", name)
+            dst = joinpath(juliatempdir(), "dev", name)
+            symlink(src, dst)
         end
-        symlink(src, dst)
         if endswith(name, "_jll")
             @assert(url === nothing && path === nothing)
             slug = Base.version_slug(uuid, tree_hash)
@@ -102,8 +114,11 @@ function handle_package(env::Set{PackageSpec})
                 get(src, "os", TARGET_OS) == TARGET_OS
             end
             for arf in valid_arfs
-                src = joinpath(Pkg.depots1(), "artifacts", arf["git-tree-sha1"])
-                dst = joinpath(outputdir(), "artifacts", arf["git-tree-sha1"])
+                sha = arf["git-tree-sha1"]
+                sha in oldlog["artifacts"] && continue
+                src = joinpath(Pkg.depots1(), "artifacts", sha)
+                dst = joinpath(juliatempdir(), "artifacts", sha)
+                push!(log["artifacts"], sha)
                 if isdir(src)
                     symlink(src, dst)
                 else
@@ -127,18 +142,19 @@ function handle_package(env::Set{PackageSpec})
         MiniProgressBars.end_progress(stdout, prog)
         printstyled("Artifacts ready!\n"; color=:green)
     end
+    log
 end
 
-function pack_env(srcenvs::Vector{String} = ["@v1.10",])
-    rm(outputdir(); force = true, recursive = true)
+function pack_env(srcenvs::Vector{String} = ["@v1.10",]; update_history = false)
+    rm(juliatempdir(); force = true, recursive = true)
     env = Set{PackageSpec}()
     for srcenv in srcenvs
         if isdir(srcenv)
             srcenv_path = srcenv
-            desenv_path = joinpath(outputdir(), "environments", split(srcenv, '\\')[end])
+            desenv_path = joinpath(juliatempdir(), "environments", split(srcenv, '\\')[end])
         elseif srcenv[1] == '@'
             srcenv_path = joinpath(Pkg.depots1(), "environments", srcenv[2:end])
-            desenv_path = joinpath(outputdir(), "environments", srcenv[2:end])
+            desenv_path = joinpath(juliatempdir(), "environments", srcenv[2:end])
         else
             error("unresolvable env name!")
         end
@@ -150,7 +166,25 @@ function pack_env(srcenvs::Vector{String} = ["@v1.10",])
         read_whole_env!(env, manifest_path)
     end
     handle_registries(env)
-    handle_package(env)
+    log = handle_package(env)
+    # pack_env
+    zip_path = joinpath(homedir(), ".envpack", "packed")
+    rm(zip_path, force=true, recursive=true)
+    run(pipeline(`$(PlatformEngines.exe7z()) a -tzip -v256m -mx5 -mmt16 $(joinpath(zip_path, "output")) $(juliatempdir())`))
+    # history
+    if update_history
+        history = joinpath(homedir(), ".envpack", "history.toml")
+        if isfile(history)
+            newfile = "history-$(now()).toml"
+            newfile = replace(newfile, ':'=>'_')
+            to = joinpath(homedir(), ".envpack", "old-history")
+            mkpath(to)
+            mv(history, joinpath(to, newfile))
+        end
+        open(history, "w") do io
+            TOML.print(io, log)
+        end
+    end
 end
 
 end
