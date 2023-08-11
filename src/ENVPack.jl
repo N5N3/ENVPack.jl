@@ -145,7 +145,7 @@ function handle_package(env::Set{PackageSpec})
     log
 end
 
-function pack_env(srcenvs::Vector{String} = ["@v1.10",]; update_history = false)
+function pack_env(srcenvs::Vector{String} = ["@v1.11",]; update_history = false)
     rm(juliatempdir(); force = true, recursive = true)
     env = Set{PackageSpec}()
     for srcenv in srcenvs
