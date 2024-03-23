@@ -105,27 +105,39 @@ function handle_package(env::Set{PackageSpec})
             dst = joinpath(juliatempdir(), "dev", name)
             symlink(src, dst)
         end
-        if endswith(name, "_jll")
-            @assert(url === nothing && path === nothing)
+        if path === nothing
+            isjll = endswith(name, "_jll")
+            if isjll
+                @assert(url === nothing && path === nothing)
+            end            
             slug = Base.version_slug(uuid, tree_hash)
-            arfs = joinpath(Pkg.depots1(), "packages", name, slug, "Artifacts.toml") |> TOML.parsefile |> values |> only
-            valid_arfs = Iterators.filter(arfs) do src
-                get(src, "arch", TARGET_ARCH) == TARGET_ARCH &&
-                get(src, "os", TARGET_OS) == TARGET_OS
-            end
-            for arf in valid_arfs
-                sha = arf["git-tree-sha1"]
-                sha in oldlog["artifacts"] && continue
-                src = joinpath(Pkg.depots1(), "artifacts", sha)
-                dst = joinpath(juliatempdir(), "artifacts", sha)
-                push!(log["artifacts"], sha)
-                if isdir(src)
-                    symlink(src, dst)
-                else
-                    @assert !isdir(dst)
-                    down = only(arf["download"])
-                    mkpath(dirname(dst))
-                    push!(downs, (down["url"], down["sha256"], dst))
+            arfname = joinpath(Pkg.depots1(), "packages", name, slug, "Artifacts.toml")
+            if isjll || isfile(arfname)
+                if !isjll
+                    @warn "$name has artifacts!\n"
+                end
+                arfs = arfname |> TOML.parsefile |> values |> only
+                if arfs isa Dict{String, Any}
+                    arfs = [arfs]
+                end
+                valid_arfs = Iterators.filter(arfs) do src
+                    get(src, "arch", TARGET_ARCH) == TARGET_ARCH &&
+                    get(src, "os", TARGET_OS) == TARGET_OS
+                end
+                for arf in valid_arfs
+                    sha = arf["git-tree-sha1"]
+                    sha in oldlog["artifacts"] && continue
+                    src = joinpath(Pkg.depots1(), "artifacts", sha)
+                    dst = joinpath(juliatempdir(), "artifacts", sha)
+                    push!(log["artifacts"], sha)
+                    if isdir(src)
+                        symlink(src, dst)
+                    else
+                        @assert !isdir(dst)
+                        down = only(arf["download"])
+                        mkpath(dirname(dst))
+                        push!(downs, (down["url"], down["sha256"], dst))
+                    end
                 end
             end
         end
